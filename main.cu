@@ -19,8 +19,8 @@ using namespace std;
     }                                                        \
   }
 
-__global__ void MinMaxNormalize(float* input, float* output, const int newRange, const int oldRange, const int newMin, const int oldMin){
-	int idx = threadIdx.x;
+__global__ void minmax(float* input, float* output, float newRange, float oldRange, float newMin, float oldMin){
+	int idx = (blockIdx.x * blockDim.x) +  threadIdx.x;
 	output[idx] = ((((input[idx] - oldMin) * newRange) / oldRange) + newMin);
 }
 
@@ -88,22 +88,22 @@ void readCsvFile(vector<vector<string>>& rows, std::string fileName, int asset){
 	
 }
 
-void createSeqLabels(vector<vector<string>>& input, vector<float*>& sequences, vector<float*>& labels, int seqSize, int labelSize, int feature, int splitIdx){
+void createSeqLabels(float* input, vector<float*>& sequences, vector<float*>& labels, int seqSize, int labelSize, int inputSize){
 	float* temp;
 	float* tempLabel;
 	int temp_idx = 0;
 	int temp_label= 0;
-	cout << "Creating sequences and labels from " << splitIdx << " data points" << endl;
+	cout << "Creating sequences and labels from " << inputSize << " data points" << endl;
 
 	//only segment on data before the train/test split
-	for (int index = 0; index < (splitIdx - seqSize - labelSize); index+=labelSize){
+	for (int index = 0; index < (inputSize - seqSize - labelSize); index+=labelSize){
 		temp = new float[seqSize];
 		temp_idx = 0;
 		tempLabel = new float[labelSize];
 		temp_label = 0; 
 		
 		for (int sub = index; sub < index + seqSize; sub++){
-			temp[temp_idx] = stof(input[sub][feature]);
+			temp[temp_idx] = input[sub];
 			temp_idx++; 
 		}
 		if (temp_idx == seqSize){
@@ -111,7 +111,7 @@ void createSeqLabels(vector<vector<string>>& input, vector<float*>& sequences, v
 		}	
 	
 		for (int sub = index + seqSize; sub < (index + seqSize + labelSize); sub++){
-			tempLabel[temp_label] = stof(input[sub][feature]);
+			tempLabel[temp_label] = input[sub];
 			temp_label++; 
 		}
 		if (temp_label == labelSize){
@@ -119,7 +119,6 @@ void createSeqLabels(vector<vector<string>>& input, vector<float*>& sequences, v
 		}	
 	}
 	
-	cout << "Created " << sequences.size() << " sequences, " << labels.size() << " labels" << endl;
 }
 
 
@@ -155,11 +154,7 @@ int main(int argc, char const *argv[]) {
 		//read input data from CSV
 		readCsvFile(rows, argv[2], asset);
 		cout << "Read " << rows.size() << " input rows" << endl;
-		for (int index = 0; index < 10; index++){
-			std::cout << rows.front()[1] << std::endl;	
-
-		}
-	
+		
 		cout << "Created subset of data with asset " << asset << " containing " << rows.size() << " data points" << endl;	
 		//remove original dataset
 
@@ -175,13 +170,14 @@ int main(int argc, char const *argv[]) {
 			inputFeature[index] = stof(rows[index][feature]);
 		}
 		
-		float* cbInputFeature, devOutputFeature;
+		float* cbInputFeature;
+		float* devOutputFeature;
 		cudaMalloc((void**)&cbInputFeature, splitIdx * sizeof(float));
 		cudaMalloc((void**)&devOutputFeature, splitIdx * sizeof(float));
 			
 		int maxIndex, minIndex;
-		int newMax = 1;
-		int newMin = -1;
+		float newMax = 1.0;
+		float newMin = -1.0;
 		float maxVal, minVal;
 		cout << "Copying input feature data to device for CUBLAS" << endl;
 		cudaMemcpy(cbInputFeature, inputFeature, splitIdx * sizeof(float), cudaMemcpyHostToDevice);
@@ -193,6 +189,7 @@ int main(int argc, char const *argv[]) {
 			return(-1);
 		}
 		
+		//move max value to host
 		cudaMemcpy(&maxVal, cbInputFeature+maxIndex-1, sizeof(float), cudaMemcpyDeviceToHost);
 		maxVal = (maxVal >= 0) ? maxVal : -maxVal;
 		cout << "Absolute max of input is " << maxVal << endl;
@@ -204,6 +201,7 @@ int main(int argc, char const *argv[]) {
 			return(-1);
 		}
 		
+		//move min value to host
 		cudaMemcpy(&minVal, cbInputFeature+minIndex-1, sizeof(float), cudaMemcpyDeviceToHost);
 		minVal = (minVal >= 0) ? minVal : -minVal;
 		cout << "Absolute min of input is " << minVal << endl;
@@ -217,17 +215,27 @@ int main(int argc, char const *argv[]) {
 				 max - min 
 
 		*/
+		
+		// run normalization kernel
 		int blockSize = 256;
-		int numBlocks = (splitIdx + blockSize -1) / blockSize
-		MinMaxNormalize<<<numBlocks, blockSize>>>(cbInputFeature, devOutputFeature, (newMax - newMin), (maxVal - minVal), newMin, minVal);
+		int numBlocks = (splitIdx + blockSize - 1) / blockSize;
+		minmax<<<numBlocks, blockSize>>>(cbInputFeature, devOutputFeature, (newMax - newMin), (maxVal - minVal), newMin, minVal);
 		
-		cudaMemcpy(&outputFeature, devOutputFeature, splitIdx * sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(outputFeature, devOutputFeature, splitIdx * sizeof(float), cudaMemcpyDeviceToHost);
+		cout << "Normalization complete. Sample normalization data" << endl << endl;	
+		for (int index =0; index < 10; index++){
+			cout << "\tOriginal " << inputFeature[index] << " Normalized " << outputFeature[index] << endl;
+
+		}
+		cout << endl;
 		
+		// memory cleanup
 		free(inputFeature);
 		cudaFree(cbInputFeature);
-		cudaFree(devOutputFeature);
+		cudaFree(&devOutputFeature);
 		cbstatus = cublasDestroy(cbhandle);
 		
+
 		if( cbstatus != CUBLAS_STATUS_SUCCESS){
 			cerr << "CUBLAS shutdown error" << endl;
 			return(-1);
@@ -236,8 +244,9 @@ int main(int argc, char const *argv[]) {
 		//create training sequences and labels.
 		vector<float*> sequences;
 		vector<float*> labels;
-		createSeqLabels(rows, sequences, labels, seqSize, labelSize, feature, splitIdx);
+		createSeqLabels(outputFeature, sequences, labels, seqSize, labelSize, splitIdx);
 		
+		cout << "Created " << sequences.size() << " sequences, " << labels.size() << " labels" << endl;
 		
 
 
@@ -245,16 +254,18 @@ int main(int argc, char const *argv[]) {
 		cout << "Inference coming soon" << endl;
 		
 	} 
-	/*
+	
 	cudnnHandle_t cudnnHandle;
 	cudnnStatus_t status;
  	checkCUDNN(cudnnCreate(&cudnnHandle));
 	cudnnRNNDataDescriptor_t RNNDataDesc;
     checkCUDNN(cudnnCreateRNNDataDescriptor(&RNNDataDesc));
+	/*
 	cudnnRNNMode_t = 
 	cudnnRNNInputMode_t
 	cudnnRNNBiatMode_t
-	
+	*/
+
 	//checkCUDNN(cudnnRNNForward(&cudnnHandle, &RNNDataDesc, CUDNN_FWD_MODE_TRAINING));
     auto deviceMemoryAvailable  = getDeviceMemory();
 	cout << deviceMemoryAvailable << endl;
@@ -262,10 +273,10 @@ int main(int argc, char const *argv[]) {
 	int inputTensorSize = seqSize * batch * inputSize;
 	int outputTensorSize = seqSize * batch * inputSize;
 	int hiddenTensorSize = numLayers * batch * hiddenSize;
-	int hiddemDim[3]
+	int hiddemDim[3];
 	int hiddenDim[0] = numLayers;
 	int hiddenDim[1] = batch;
-	int hiddenDime[2] = hiddenSize;
+	int hiddenDim[2] = hiddenSize;
  	int numLinearLayers = 8;
 	int memoryUsage = (2 * inputTensorSize + 2 * outputTensorSize + 8 * hiddenTensorSize) * sizeof(float32);
 
@@ -280,13 +291,10 @@ int main(int argc, char const *argv[]) {
 	int inputDims[nDims] = {batch, features, inputSize};
 	checkCUDNN(cudnnSetTensorNdDescriptorEx(inputDescriptor, CUDA_DATA_FLOAT, inputDims));
 	//allocate input array
-	inputArr = (int*)malloc(batch * sizeof(int));
-	cudaMalloc
-	cudaMemcpy(inputArr, devInputArray, 
 
 	checkCUDNN(cudnnDestroyTensorDescriptor(biasDescriptor);
 	checkCUDNN(cudnnDestroyTensorDescriptor(weightsDescriptor);
 	checkCUDNN(cudnnDestroyTensorDescriptor(inputDescriptor);
     cudnnDestroy(cudnnHandle);
-	*/
+	
 }
