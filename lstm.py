@@ -1,3 +1,15 @@
+'''
+LSTM.py
+
+This file creates a LSTM network with PyTorch in order
+to train a cryptocurrency forecasting model.
+
+Author: Andrea Golden-Lasher
+
+Basic code structure follows:
+https://stackabuse.com/time-series-prediction-using-lstm-with-pytorch-in-python/
+
+'''
 import sys
 import csv
 import os
@@ -11,26 +23,17 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from numpy import genfromtxt
-'''
-Params:
-	input_size – The number of expected features in the input x
-    hidden_size – The number of features in the hidden state h
-    num_layers – Number of recurrent layers. E.g., setting num_layers=2 would mean stacking two LSTMs together to form a stacked LSTM, with the second LSTM taking in outputs of the first LSTM and computing the final results. Default: 1
-    bias – If False, then the layer does not use bias weights b_ih and b_hh. Default: True
-    batch_first – If True, then the input and output tensors are provided as (batch, seq, feature) instead of (seq, batch, feature). Note that this does not apply to hidden or cell states. See the Inputs/Outputs sections below for details. Default: False
-    dropout – If non-zero, introduces a Dropout layer on the outputs of each LSTM layer except the last layer, with dropout probability equal to dropout. Default: 0
-    bidirectional – If True, becomes a bidirectional LSTM. Default: False
-    proj_size – If > 0, will use LSTM with projections of corresponding size. Default: 0
-'''
 
+# main function
 def main():
+	# read in command line arguments
 	parser = optparse.OptionParser()
 	parser.add_option("-f", "--file", dest="filename", help="path to input file")
 	parser.add_option("-v", "--verbose",
                   action="store_true", dest="verbose", default=False,
                   help="print status messages to stdout")
 	parser.add_option("-t", "--train", action="store_true", dest="train", default=False, help="train the network on file specified")
-	parser.add_option("-a", "--asset", dest="asset",type=int, help="index representing asset number")
+	parser.add_option("-a", "--asset", dest="asset",type=int, help="index representing asset number", default=0)
 	parser.add_option("-c", "--checkpoint", dest="checkpoint", help="filename of checkpoint to load for eval")
 	parser.add_option("-w", "--window", dest="window",type=int, default=1440, help="number of timesteps in sequence")
 	parser.add_option("-l", "--label", dest="label",type=int, default=60, help="number of timesteps in label/target")
@@ -41,14 +44,17 @@ def main():
 	parser.add_option("-p", "--percent", dest="percent",type=float, default=0.8, help="train/test split percentage")
 	parser.add_option("-r", "--lr", dest="lr",type=float, default=0.001, help="learning rate")
 	parser.add_option("-o", "--output", dest="output",type=int, default=60, help="number of timesteps to predict in eval. Must be >= label size")
+	parser.add_option("-s", "--selection", dest="selection",type=float, default=1.0, help="portion of train data to read (percent)")
 	(opts, args) = parser.parse_args()
 	
+	# setup variables
 	window = opts.window
 	label = opts.label
 	batch = opts.batch
 	layers = opts.layers
 	hidden_cells_num = opts.hidden
 
+	# ensure input and checkpoints are specified
 	if not opts.filename:
 		parser.error("Input file is required")
 
@@ -61,13 +67,28 @@ def main():
 		print('Error: in training mode, input file must be CSV.')
 		sys.exit(-1)
 
+	# read data from the csv input file
 	df = pd.read_csv(opts.filename, delimiter=',', parse_dates=[0], infer_datetime_format=True)
+	print("Total rows", len(df.index))
+	
+	# only use a portion from the beginning of the input data
+	if opts.selection < 1.0:
+		df = df.head(int(opts.selection * len(df.index)))
+
+	# select only one asset
 	asset_df = df[df['Asset_ID'] == opts.asset]
+	
+	# convert from pandas to numpy array
 	data = asset_df.to_numpy()
-	#plt.figure()
-	#df[['timestamp', 'Asset_ID', 'Open']].plot()
-	#plt.show()
-	#print(df)
+
+	# code to plot all of the asset's data and save to png
+	'''
+	plt.figure()
+	plt.title("Bitcoin Price Over Time")
+	asset_df[['timestamp', 'Open']].plot(title="Price", xlabel="Samples", ylabel="USD")
+	plt.savefig("asset1.png")
+	'''
+
 	#split train/test data
 	len_data = np.shape(data)[0]
 	test_percent = opts.percent
@@ -75,11 +96,11 @@ def main():
 	if opts.verbose: print("Split index: ", train_test_split_idx)
 	test_data = data[train_test_split_idx:, 3]
 
-	#normalize training data
+	#normalize training data with min-max
 	scaler = MinMaxScaler(feature_range=(-1, 1))
 	normalized_data = scaler.fit_transform(data[:train_test_split_idx, 3].reshape(-1, 1))
 	if opts.verbose: print("original data sample", data[0:20, 3])
-	if opts.verbose: print("normalizaed data sample", normalized_data[0:20, :])
+	if opts.verbose: print("normalized data sample", normalized_data[0:20, :])
 	train_data = torch.FloatTensor(normalized_data)
 	
 	if opts.verbose: print("Input data shape:", np.shape(data))
@@ -95,13 +116,18 @@ def main():
 			label_val = train_data[i + window:i+window+label]
 			subsets.append(subset)
 			label_vals.append(label_val)
-
+		if opts.verbose: print("Number of subsets", len(subsets))
+		
 		# divide input sequences and labels into batches
 		batches = []
 		for i in range(len(subsets) % batch):
-			temp_b = torch.stack(subsets[i * batch: i*batch + batch])
-			temp_l =torch.stack(label_vals[i * batch: i*batch + batch])
-			batches.append((temp_b, temp_l))
+			try:
+				temp_b = torch.stack(subsets[i * batch: i*batch + batch])
+				temp_l =torch.stack(label_vals[i * batch: i*batch + batch])
+				batches.append((temp_b, temp_l))
+			except Exception as e:
+				print(e)
+				break
 		if opts.verbose: print("Sample batch dims: ", batches[0][0].shape)
 		
 		#initialize cuda device usage
@@ -129,7 +155,7 @@ def main():
 		
 		#set number of training epochs
 		epochs = opts.epochs
-		
+		losses = []	
 		if opts.verbose: print(f"Beginning training for {epochs} epochs")
 		for i in range(0, epochs):
 			for sequence, labels in batches:
@@ -141,18 +167,33 @@ def main():
 				loss = loss_func(pred, labels.cuda())
 				loss.backward()
 				optimizer.step()	
+			losses.append(loss.item())
 			if opts.verbose:
 				print(f'Epoch: {i} loss: {loss.item():10.8f}')
 		
+			#save checkpoint
 			torch.save(model.state_dict(), "epoch-" + str(i) + opts.checkpoint)		
 		print(f'Epoch: {i} loss: {loss.item():10.8f}')
 	
+		# code to plot loss and save it to a png
+		'''
+		plt.figure()
+		loss_x = np.arange(0, epochs, 1)
+		loss_y = np.array(losses)
+		plt.scatter(loss_x, loss_y)
+		plt.title("Loss per epoch")
+		plt.xlabel('Epoch #')
+		plt.ylabel('Loss')	
+		plt.savefig('losses.png')
+		'''
+
 	#evaluation mode
 	if not opts.train:
 		#initialize cuda device usage
 		device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 		if opts.verbose: print("Using device", torch.cuda.get_device_name(0), device)
 
+		#create model, load state from a checkpoint
 		model = LSTMCrypto(layers, hidden_cells_num, label, batch, layers, batch_first=True)
 		model.load_state_dict(torch.load(opts.checkpoint))
 		if opts.verbose: print("Model: ", model)
@@ -160,38 +201,51 @@ def main():
 		model.to(device)
 		model.eval()
 		
+		#select the end of the train data as a starting sequence for the test data 
 		eval_seed = normalized_data[-window:].tolist()
-		eval_sequence = torch.FloatTensor(eval_seed[-window:]).unsqueeze(0).cuda()
-		print("Len eval", len(eval_seed))
+		eval_sequence = torch.FloatTensor(eval_seed[:window]).unsqueeze(0).cuda()
+		
+		#perform evaluation
 		for i in range(opts.output // label):
-			print(eval_sequence.shape)
-			eval_sequence = eval_sequence[:, -window:]
+			temp_input = eval_sequence[:, -window:, :]
 			with torch.no_grad():
 				model.hidden_cell = (torch.zeros(model.layers, model.batch, model.hidden_dim).cuda(),
 									 torch.zeros(model.layers, model.batch, model.hidden_dim).cuda())
-				out = model(eval_sequence.cuda())
+				out = model(temp_input.cuda())
 				eval_sequence = torch.cat((eval_sequence, out), dim=1)
 				print(eval_sequence.shape)
 		
 		#device to host, remove batch dimension
 		eval_sequence = eval_sequence.cpu().squeeze(0).detach().numpy() 
-		if opts.verbose: print("Eval out", eval_sequence, eval_sequence.shape)
-		
+	
+		# unnormalize the prediction	
 		unnormalized_preds = scaler.inverse_transform(eval_sequence.reshape(-1,1))
 		if opts.verbose: print("Unnormalized preds", unnormalized_preds)
-		print(unnormalized_preds.shape)
-		x = np.arange(window, window + label,1)
+		
+		#code for plotting
+		x1 = np.arange(0, window,1)
+		x2 = np.arange(window, window + opts.output,1)
+		plt.figure()
 		plt.title('Actual vs Preds')
 		plt.grid(True)
 		plt.autoscale(axis='x', tight=True)
-		plt.plot(data[-window:,3])
-		plt.plot(x, unnormalized_preds[-label:, :])
+		idx1 = train_test_split_idx - window
+		plt.plot(x1, data[idx1:train_test_split_idx, 3])
+		plt.plot(x2, unnormalized_preds[-opts.output:, :])
+		plt.plot(x2, test_data[0:opts.output])
 		plt.xlabel("Sample #")
 		plt.ylabel("Price")
-		plt.show() 
-	
-		#torch.manual_seed(1)
+		plt.savefig("output.png") 
+		
+		#calculate MSE
+		array1 = unnormalized_preds[-opts.output:, :]
+		array2 = test_data[0:opts.output]
+		difference = np.subtract(array1, array2)
+		squared = np.square(difference)
+		mse = squared.mean()
+		if opts.verbose: print("MSE between predictions and actual test", mse)
 
+#class definition for the LSTM model
 class LSTMCrypto(nn.Module):
 	def __init__(self, input_dim, hidden_dim, output_dim, batch, layers=1, batch_first=False):
 		super().__init__()
@@ -206,16 +260,9 @@ class LSTMCrypto(nn.Module):
 							torch.zeros(layers,batch,self.hidden_dim))
 	def forward(self, input_sequence):
 		lstm_out, self.hidden_cell = self.lstm(input_sequence, self.hidden_cell)
-		preds = self.linear(lstm_out[:, -1, :]) #.view(len(input_sequence), -1))
+		preds = self.linear(lstm_out[:, -1, :])
 		return preds.unsqueeze(2)
 		
-
-
-rnn = nn.LSTM(10, 20, 2)
-input = torch.randn(5, 3, 10)
-h0 = torch.randn(2, 3, 20)
-c0 = torch.randn(2, 3, 20)
-output, (hn, cn) = rnn(input, (h0, c0))
-print(output, hn, cn)
+# run program
 if __name__ == "__main__":
 	main()
